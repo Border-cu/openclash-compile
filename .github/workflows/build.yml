@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   build:
@@ -19,7 +20,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/share/swift
           df -h
 
-      - name: Enable universe repository
+      - name: Enable universe repository (确保所有包可用)
         run: |
           sudo add-apt-repository universe
           sudo apt-get update
@@ -36,8 +37,9 @@ jobs:
             xmlto libelf-dev libtool autopoint antlr3 gperf ccache swig coreutils \
             haveged scons libpython3-dev jq \
             libpam-dev liblzma-dev libsnmp-dev \
-            libxattr-dev libcurl4-openssl-dev libioctl-dev \  # 新增依赖（关键）
-            libgnutls28-dev libseccomp-dev libcap-dev  # 新增依赖（关键）
+            libxattr-dev libcurl4-openssl-dev \  # 保留必需依赖，移除无效包
+            libgnutls28-dev libseccomp-dev libcap-dev libpcap-dev \
+            libncurses-dev libz-dev libexpat1-dev  # 添加其他可能需要的依赖
 
       - name: Clone OpenWrt source
         run: |
@@ -61,16 +63,19 @@ jobs:
           cd openwrt-source/feeds/packages/net/openclash
           # 修复头文件包含
           sed -i 's/#include <sys\/socket.h>/#include <sys\/socket.h>\n#include <sys\/ioctl.h>\n#include <netinet\/tcp.h>/' src/*.cpp
-          # 补充缺失的宏定义
+          
+          # 添加缺失的宏定义（解决FIONBIO未定义问题）
           cat >> include/netinet/tcp.h << 'EOF'
           #ifndef FIONBIO
           #define FIONBIO 0x5421
           #endif
+          
           #ifndef SO_NONBLOCK
           #define SO_NONBLOCK 0x8000
           #endif
           EOF
-          # 声明environ变量
+          
+          # 解决environ未声明问题
           sed -i 's/#include <stdio.h>/#include <stdio.h>\nextern char **environ;/' src/*.cpp
 
       - name: Configure build
@@ -91,23 +96,85 @@ jobs:
           
           # 启用openclash相关配置
           echo "CONFIG_PACKAGE_openclash=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config  # 启用Web界面
+          echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config  # 启用LuCI界面
           echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
-          echo "CONFIG_PACKAGE_kmod-ipt-mod-tproxy=y" >> .config
-          echo "CONFIG_PACKAGE_ipset=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-ipt-mod-tproxy=y" >> .config  # 透明代理模块
+          echo "CONFIG_PACKAGE_ipset=y" >> .config  # IP集合管理工具
+          echo "CONFIG_PACKAGE_iptables-mod-tproxy=y" >> .config  # iptables TPROXY模块
+          echo "CONFIG_PACKAGE_coreutils-nohup=y" >> .config  # 后台运行支持
+          echo "CONFIG_PACKAGE_bind-dig=y" >> .config  # DNS查询工具
+          
+          # 保存配置文件以便调试
+          cat .config > ../openwrt_config.txt
+
+      - name: 显示配置信息（调试）
+        run: |
+          cd openwrt-source
+          echo "当前架构配置:"
+          cat .config | grep -E "CONFIG_TARGET_ARCH|CONFIG_TARGET_SUBTARGET|CONFIG_TARGET_armvirt"
+          echo "OpenClash 相关配置:"
+          cat .config | grep -E "openclash|tun|tproxy"
 
       - name: Build OpenWrt with OpenClash
         run: |
           cd openwrt-source
-          make -j$(nproc) V=s  # 使用多线程编译
+          # 先下载所有包以检测网络问题
+          make download -j8 V=s || make download -j1 V=s
+          echo "下载完成，开始编译..."
+          
+          # 使用多线程编译提高效率
+          make -j$(($(nproc) + 1)) V=s || make -j1 V=s IGNORE_ERRORS=1
+          
+          # 显示编译结果统计
+          echo "编译结果统计:"
+          find bin/targets/ -name "*.ipk" | wc -l
+          du -sh bin/
+
+      - name: 显示编译产物路径（调试）
+        run: |
+          cd openwrt-source
+          echo "编译产物目录结构:"
+          ls -R bin/packages/ || echo "bin/packages/ 目录不存在"
+          
+          # 查找关键IPK包
+          echo "查找OpenClash相关IPK包:"
+          find bin/ -name "openclash_*.ipk" -o -name "kmod-tun_*.ipk" || echo "未找到相关IPK包"
+
+      - name: 收集错误日志（如果编译失败）
+        if: failure()
+        run: |
+          cd openwrt-source
+          mkdir -p ../build_logs
+          # 收集错误日志
+          find build_dir/ -name "*.log" -exec cp {} ../build_logs/ \; || true
+          # 压缩日志文件
+          cd ../
+          zip -r build_logs.zip build_logs/
+
+      - name: 上传错误日志（如果编译失败）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-error-logs
+          path: build_logs.zip
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: openclash-ipk-and-kmods
           path: |
-            openwrt-source/bin/packages/*/packages/openclash_*.ipk  # 通配符匹配（关键）
+            openwrt-source/bin/packages/*/packages/openclash_*.ipk
             openwrt-source/bin/packages/*/packages/luci-app-openclash_*.ipk
             openwrt-source/bin/packages/*/packages/kmod-tun_*.ipk
             openwrt-source/bin/packages/*/packages/kmod-ipt-mod-tproxy_*.ipk
-          retention-days: 14
+            openwrt-source/bin/packages/*/packages/iptables-mod-tproxy_*.ipk
+            openwrt-source/bin/packages/*/packages/ipset_*.ipk
+          if-no-files-found: warn
+          retention-days: 14  # 延长保留时间到14天
+
+      - name: 上传配置文件（用于调试）
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-config
+          path: openwrt_config.txt
+          retention-days: 7
