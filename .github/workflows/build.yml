@@ -24,26 +24,26 @@ jobs:
           tar -xJf sdk.tar.xz
           cd $(ls -d OpenWrt-SDK-23.05.5-armsr-armv8*)
           echo "SDK_DIR=$(pwd)" >> $GITHUB_ENV
+          echo "SDK 目录内容:"
+          ls -la  # 检查目录结构是否完整
 
-      - name: 稀疏拉取 OpenClash 源码
+      - name: 获取 OpenClash 源码（完整检出）
         run: |
           cd $SDK_DIR
-          mkdir -p package/luci-app-openclash
-          cd package/luci-app-openclash
-          git init
-          git remote add origin https://github.com/vernesong/OpenClash.git
-          git config core.sparsecheckout true
-          echo "luci-app-openclash" >> .git/info/sparse-checkout
-          git pull --depth 1 origin master
+          git clone --depth=1 https://github.com/vernesong/OpenClash.git package/luci-app-openclash
+          echo "OpenClash 源码已完整检出"
 
       - name: 编译 po2lmo 工具
         run: |
           cd $SDK_DIR/package/luci-app-openclash/luci-app-openclash/tools/po2lmo
           make && sudo make install
+          cd ../../../..
 
       - name: 初始化编译环境
         run: |
           cd $SDK_DIR
+          echo "检查 scripts 目录:"
+          ls -la scripts/  # 确认 scripts 目录存在
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -56,13 +56,14 @@ jobs:
           CONFIG_PACKAGE_luci-app-openclash=y
           CONFIG_PACKAGE_kmod-tun=y
           CONFIG_PACKAGE_kmod-ipt-nat=y
+          CONFIG_PACKAGE_kmod-ipt-masq=y
           EOF
           make defconfig
 
       - name: 编译 OpenClash 及依赖
         run: |
           cd $SDK_DIR
-          make package/luci-app-openclash/compile -j$(nproc) V=s
+          make package/luci-app-openclash/compile -j$(nproc) V=s || make package/luci-app-openclash/compile V=s  # 失败时重试
 
       - name: 打包输出
         run: |
@@ -72,9 +73,9 @@ jobs:
           find ./bin -name "kmod-*.ipk" -exec cp {} release/ \;
           zip -r openclash-arm64-$(date +%Y%m%d).zip release/
 
-      - name: 上传编译结果（v4 版本）
+      - name: 上传编译结果
         uses: actions/upload-artifact@v4
         with:
           name: openclash-arm64
           path: ${{ env.SDK_DIR }}/openclash-arm64-*.zip
-          if-no-files-found: warn  # 找不到文件时警告（可选）
+          if-no-files-found: error
