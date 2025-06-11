@@ -14,22 +14,51 @@ jobs:
           sudo apt update
           sudo apt install -y build-essential git curl python3 unzip xz-utils \
             libncurses5-dev zlib1g-dev gawk gcc-multilib flex gettext libssl-dev
+          # 验证关键工具版本
+          echo "xz 版本:"
+          xz --version
+          echo "tar 版本:"
+          tar --version
 
       - name: 下载 OpenWrt SDK
         run: |
           mkdir -p ~/openwrt
           cd ~/openwrt
+          echo "开始下载 SDK..."
           curl -SLk https://downloads.openwrt.org/releases/23.05.5/targets/armsr/armv8/openwrt-sdk-23.05.5-armsr-armv8_gcc-12.3.0_musl.Linux-x86_64.tar.xz \
             -o sdk.tar.xz
+          echo "SDK 下载完成，验证文件大小..."
+          du -h sdk.tar.xz
+          
+          # 验证文件完整性（可选）
+          echo "验证 SDK 文件完整性..."
+          if [ $(du -b sdk.tar.xz | cut -f1) -lt 100000000 ]; then
+            echo "SDK 文件过小，可能下载不完整"
+            exit 1
+          fi
+
+      - name: 解压 SDK
+        run: |
+          cd ~/openwrt
+          echo "开始解压 SDK..."
           tar -xJf sdk.tar.xz
-          cd $(ls -d OpenWrt-SDK-23.05.5-armsr-armv8*)
-          echo "SDK_DIR=$(pwd)" >> $GITHUB_ENV
+          echo "解压完成，检查目录结构..."
+          ls -la
+          
+          # 明确指定 SDK 目录路径，避免通配符匹配错误
+          SDK_DIR=$(ls -d OpenWrt-SDK-23.05.5-armsr-armv8*)
+          echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
+          
+          # 检查 SDK 目录是否包含必要文件
           echo "SDK 目录内容:"
-          ls -la  # 检查目录结构是否完整
+          ls -la $SDK_DIR
+          echo "SDK 目录下的 scripts 目录:"
+          ls -la $SDK_DIR/scripts || echo "scripts 目录不存在！"
 
       - name: 获取 OpenClash 源码（完整检出）
         run: |
           cd $SDK_DIR
+          echo "开始克隆 OpenClash 源码..."
           git clone --depth=1 https://github.com/vernesong/OpenClash.git package/luci-app-openclash
           echo "OpenClash 源码已完整检出"
 
@@ -42,9 +71,11 @@ jobs:
       - name: 初始化编译环境
         run: |
           cd $SDK_DIR
-          echo "检查 scripts 目录:"
-          ls -la scripts/  # 确认 scripts 目录存在
-          ./scripts/feeds update -a
+          echo "更新 feeds..."
+          ./scripts/feeds update -a || {
+            echo "feeds 更新失败，尝试重新下载 SDK..."
+            exit 1
+          }
           ./scripts/feeds install -a
 
       - name: 配置编译选项
@@ -63,7 +94,7 @@ jobs:
       - name: 编译 OpenClash 及依赖
         run: |
           cd $SDK_DIR
-          make package/luci-app-openclash/compile -j$(nproc) V=s || make package/luci-app-openclash/compile V=s  # 失败时重试
+          make package/luci-app-openclash/compile -j$(nproc) V=s || make package/luci-app-openclash/compile V=s
 
       - name: 打包输出
         run: |
