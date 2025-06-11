@@ -1,0 +1,79 @@
+name: Build OpenClash for OpenWrt 23.05.5 (arm64)
+
+on:
+  workflow_dispatch:  # 手动触发
+  schedule:
+    - cron: '0 0 * * 1'  # 每周一自动编译
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 环境准备
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential git curl python3 unzip xz-utils \
+            libncurses5-dev zlib1g-dev gawk gcc-multilib flex gettext libssl-dev
+
+      - name: 下载 OpenWrt SDK
+        run: |
+          mkdir -p ~/openwrt
+          cd ~/openwrt
+          curl -SLk https://downloads.openwrt.org/releases/23.05.5/targets/armsr/armv8/openwrt-sdk-23.05.5-armsr-armv8_gcc-12.3.0_musl.Linux-x86_64.tar.xz \
+            -o sdk.tar.xz
+          tar -xJf sdk.tar.xz
+          cd $(ls -d OpenWrt-SDK-23.05.5-armsr-armv8*)
+          echo "SDK_DIR=$(pwd)" >> $GITHUB_ENV
+
+      - name: 稀疏拉取 OpenClash 源码
+        run: |
+          cd $SDK_DIR
+          mkdir -p package/luci-app-openclash
+          cd package/luci-app-openclash
+          git init
+          git remote add origin https://github.com/vernesong/OpenClash.git
+          git config core.sparsecheckout true
+          echo "luci-app-openclash" >> .git/info/sparse-checkout
+          git pull --depth 1 origin master
+
+      - name: 编译 po2lmo 工具
+        run: |
+          cd $SDK_DIR/package/luci-app-openclash/luci-app-openclash/tools/po2lmo
+          make && sudo make install
+
+      - name: 初始化编译环境
+        run: |
+          cd $SDK_DIR
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 配置编译选项
+        run: |
+          cd $SDK_DIR
+          cat > .config << EOF
+          CONFIG_TARGET_armsr=y
+          CONFIG_TARGET_armsr_armv8=y
+          CONFIG_PACKAGE_luci-app-openclash=y
+          CONFIG_PACKAGE_kmod-tun=y
+          CONFIG_PACKAGE_kmod-ipt-nat=y
+          EOF
+          make defconfig
+
+      - name: 编译 OpenClash 及依赖
+        run: |
+          cd $SDK_DIR
+          make package/luci-app-openclash/compile -j$(nproc) V=s
+
+      - name: 打包输出
+        run: |
+          cd $SDK_DIR
+          mkdir -p release
+          find ./bin -name "luci-app-openclash_*.ipk" -exec cp {} release/ \;
+          find ./bin -name "kmod-*.ipk" -exec cp {} release/ \;
+          zip -r openclash-arm64-$(date +%Y%m%d).zip release/
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v3
+        with:
+          name: openclash-arm64-build
+          path: ${{ env.SDK_DIR }}/openclash-arm64-*.zip
