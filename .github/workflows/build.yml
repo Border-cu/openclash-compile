@@ -1,112 +1,116 @@
-name: Build OpenClash for OpenWrt 23.05.5 (arm64)
+name: Build OpenClash for OpenWrt 23.05.5 arm64
 
 on:
   workflow_dispatch:  # 手动触发
+  push:
+    branches: [ main ]  # 代码更新时触发
   schedule:
-    - cron: '0 0 * * 1'  # 每周一自动编译
+    - cron: '0 0 * * 0'  # 每周日自动编译
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    
     steps:
-      - name: 环境准备
-        run: |
-          sudo apt update
-          sudo apt install -y build-essential git curl python3 unzip xz-utils \
-            libncurses5-dev zlib1g-dev gawk gcc-multilib flex gettext libssl-dev
-          # 验证关键工具版本
-          echo "xz 版本:"
-          xz --version
-          echo "tar 版本:"
-          tar --version
-
-      - name: 下载 OpenWrt SDK
-        run: |
-          mkdir -p ~/openwrt
-          cd ~/openwrt
-          echo "开始下载 SDK..."
-          curl -SLk https://downloads.openwrt.org/releases/23.05.5/targets/armsr/armv8/openwrt-sdk-23.05.5-armsr-armv8_gcc-12.3.0_musl.Linux-x86_64.tar.xz \
-            -o sdk.tar.xz
-          echo "SDK 下载完成，验证文件大小..."
-          du -h sdk.tar.xz
-          
-          # 验证文件完整性（可选）
-          echo "验证 SDK 文件完整性..."
-          if [ $(du -b sdk.tar.xz | cut -f1) -lt 100000000 ]; then
-            echo "SDK 文件过小，可能下载不完整"
-            exit 1
-          fi
-
-      - name: 解压 SDK
-        run: |
-          cd ~/openwrt
-          echo "开始解压 SDK..."
-          tar -xJf sdk.tar.xz
-          echo "解压完成，检查目录结构..."
-          ls -la
-          
-          # 明确指定 SDK 目录路径，避免通配符匹配错误
-          SDK_DIR=$(ls -d OpenWrt-SDK-23.05.5-armsr-armv8*)
-          echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
-          
-          # 检查 SDK 目录是否包含必要文件
-          echo "SDK 目录内容:"
-          ls -la $SDK_DIR
-          echo "SDK 目录下的 scripts 目录:"
-          ls -la $SDK_DIR/scripts || echo "scripts 目录不存在！"
-
-      - name: 获取 OpenClash 源码（完整检出）
-        run: |
-          cd $SDK_DIR
-          echo "开始克隆 OpenClash 源码..."
-          git clone --depth=1 https://github.com/vernesong/OpenClash.git package/luci-app-openclash
-          echo "OpenClash 源码已完整检出"
-
-      - name: 编译 po2lmo 工具
-        run: |
-          cd $SDK_DIR/package/luci-app-openclash/luci-app-openclash/tools/po2lmo
-          make && sudo make install
-          cd ../../../..
-
-      - name: 初始化编译环境
-        run: |
-          cd $SDK_DIR
-          echo "更新 feeds..."
-          ./scripts/feeds update -a || {
-            echo "feeds 更新失败，尝试重新下载 SDK..."
-            exit 1
-          }
-          ./scripts/feeds install -a
-
-      - name: 配置编译选项
-        run: |
-          cd $SDK_DIR
-          cat > .config << EOF
-          CONFIG_TARGET_armsr=y
-          CONFIG_TARGET_armsr_armv8=y
-          CONFIG_PACKAGE_luci-app-openclash=y
-          CONFIG_PACKAGE_kmod-tun=y
-          CONFIG_PACKAGE_kmod-ipt-nat=y
-          CONFIG_PACKAGE_kmod-ipt-masq=y
-          EOF
-          make defconfig
-
-      - name: 编译 OpenClash 及依赖
-        run: |
-          cd $SDK_DIR
-          make package/luci-app-openclash/compile -j$(nproc) V=s || make package/luci-app-openclash/compile V=s
-
-      - name: 打包输出
-        run: |
-          cd $SDK_DIR
-          mkdir -p release
-          find ./bin -name "luci-app-openclash_*.ipk" -exec cp {} release/ \;
-          find ./bin -name "kmod-*.ipk" -exec cp {} release/ \;
-          zip -r openclash-arm64-$(date +%Y%m%d).zip release/
-
-      - name: 上传编译结果
-        uses: actions/upload-artifact@v4
-        with:
-          name: openclash-arm64
-          path: ${{ env.SDK_DIR }}/openclash-arm64-*.zip
-          if-no-files-found: error
+    - name: 准备编译环境
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential git curl python3 unzip xz-utils \
+          libncurses5-dev zlib1g-dev gawk gcc-multilib flex gettext-base libssl-dev \
+          libxml-parser-perl python3-distutils python3-dev
+        echo "编译环境准备完成"
+    
+    - name: 下载 OpenWrt SDK
+      run: |
+        mkdir -p ~/openwrt_compile
+        cd ~/openwrt_compile
+        curl -SLk --connect-timeout 30 --retry 3 \
+          "https://downloads.openwrt.org/releases/23.05.5/targets/armsr/armv8/openwrt-sdk-23.05.5-armsr-armv8_gcc-12.3.0_musl.Linux-x86_64.tar.xz" \
+          -o "openwrt-sdk.tar.xz"
+        tar -xJf openwrt-sdk.tar.xz
+        cd $(ls -d OpenWrt-SDK-23.05.5-armsr-armv8*)
+        echo "SDK_DIR=$(pwd)" >> $GITHUB_ENV
+        echo "SDK 下载和解压完成"
+    
+    - name: 克隆 OpenClash 源码
+      run: |
+        cd $SDK_DIR
+        git clone --depth=1 https://github.com/vernesong/OpenClash.git package/luci-app-openclash
+        echo "OpenClash 源码克隆完成"
+    
+    - name: 编译 po2lmo 工具
+      run: |
+        cd $SDK_DIR/package/luci-app-openclash/luci-app-openclash/tools/po2lmo
+        make && make install
+        cd ../../../..
+        echo "po2lmo 工具编译完成"
+    
+    - name: 更新 feeds
+      run: |
+        cd $SDK_DIR
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        echo "feeds 更新和安装完成"
+    
+    - name: 配置编译选项
+      run: |
+        cd $SDK_DIR
+        cat > .config << EOF
+CONFIG_TARGET_armsr=y
+CONFIG_TARGET_armsr_armv8=y
+CONFIG_PACKAGE_luci-app-openclash=y
+CONFIG_PACKAGE_kmod-tun=y
+CONFIG_PACKAGE_kmod-ipt-nat=y
+CONFIG_PACKAGE_kmod-ipt-masq=y
+CONFIG_PACKAGE_kmod-ipt-conntrack=y
+CONFIG_PACKAGE_kmod-ipt-core=y
+CONFIG_PACKAGE_kmod-nf-conntrack=y
+CONFIG_PACKAGE_kmod-nf-nat=y
+EOF
+        make defconfig
+        echo "编译选项配置完成"
+    
+    - name: 编译 OpenClash 及依赖
+      run: |
+        cd $SDK_DIR
+        # 先编译内核模块
+        make package/kernel/kmod-tun/compile V=s -j$(nproc)
+        make package/kernel/kmod-ipt-nat/compile V=s -j$(nproc)
+        make package/kernel/kmod-ipt-masq/compile V=s -j$(nproc)
+        make package/kernel/kmod-ipt-conntrack/compile V=s -j$(nproc)
+        
+        # 再编译 OpenClash 主程序
+        make package/luci-app-openclash/compile V=s -j$(nproc) || make package/luci-app-openclash/compile V=99
+        echo "OpenClash 及依赖编译完成"
+    
+    - name: 查找编译结果
+      run: |
+        cd $SDK_DIR
+        IPK_DIR=$(find ./bin -name "packages" -type d | head -1)
+        echo "IPK_DIR=$IPK_DIR" >> $GITHUB_ENV
+        
+        OPENCLASH_IPK=$(find "$IPK_DIR" -name "luci-app-openclash_*.ipk" | head -1)
+        echo "OPENCLASH_IPK=$OPENCLASH_IPK" >> $GITHUB_ENV
+        
+        KMOD_IPKS=$(find "$IPK_DIR" -name "kmod-*.ipk")
+        echo "KMOD_IPKS=$KMOD_IPKS" >> $GITHUB_ENV
+        
+        echo "编译结果查找完成"
+    
+    - name: 打包编译结果
+      run: |
+        cd $SDK_DIR
+        mkdir -p release
+        cp $OPENCLASH_IPK release/
+        find "$IPK_DIR" -name "kmod-*.ipk" -exec cp {} release/ \;
+        
+        cd release
+        zip -r ../openclash-arm64-$(date +%Y%m%d).zip .
+        echo "编译结果打包完成"
+    
+    - name: 上传编译结果
+      uses: actions/upload-artifact@v4
+      with:
+        name: openclash-arm64
+        path: ${{ env.SDK_DIR }}/openclash-arm64-*.zip
+        if-no-files-found: error
