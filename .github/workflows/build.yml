@@ -1,116 +1,104 @@
-name: Build OpenClash for OpenWrt 23.05.5 arm64
+name: Build OpenClash for OpenWrt 23.05.5 on arm64 v8
 
 on:
-  workflow_dispatch:  # 手动触发
+  # 可以手动触发工作流
+  workflow_dispatch:
+  # 也可以在push到main分支时自动触发
   push:
-    branches: [ main ]  # 代码更新时触发
-  schedule:
-    - cron: '0 0 * * 0'  # 每周日自动编译
+    branches:
+      - main
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    
+    runs-on: ubuntu-22.04
+    container:
+      image: openwrtorg/sdk:23.05.5-arm64_cortex-a53
+      options: --privileged
     steps:
-    - name: 准备编译环境
-      run: |
-        sudo apt update
-        sudo apt install -y build-essential git curl python3 unzip xz-utils \
-          libncurses5-dev zlib1g-dev gawk gcc-multilib flex gettext-base libssl-dev \
-          libxml-parser-perl python3-distutils python3-dev
-        echo "编译环境准备完成"
-    
-    - name: 下载 OpenWrt SDK
-      run: |
-        mkdir -p ~/openwrt_compile
-        cd ~/openwrt_compile
-        curl -SLk --connect-timeout 30 --retry 3 \
-          "https://downloads.openwrt.org/releases/23.05.5/targets/armsr/armv8/openwrt-sdk-23.05.5-armsr-armv8_gcc-12.3.0_musl.Linux-x86_64.tar.xz" \
-          -o "openwrt-sdk.tar.xz"
-        tar -xJf openwrt-sdk.tar.xz
-        cd $(ls -d OpenWrt-SDK-23.05.5-armsr-armv8*)
-        echo "SDK_DIR=$(pwd)" >> $GITHUB_ENV
-        echo "SDK 下载和解压完成"
-    
-    - name: 克隆 OpenClash 源码
-      run: |
-        cd $SDK_DIR
-        git clone --depth=1 https://github.com/vernesong/OpenClash.git package/luci-app-openclash
-        echo "OpenClash 源码克隆完成"
-    
-    - name: 编译 po2lmo 工具
-      run: |
-        cd $SDK_DIR/package/luci-app-openclash/luci-app-openclash/tools/po2lmo
-        make && make install
-        cd ../../../..
-        echo "po2lmo 工具编译完成"
-    
-    - name: 更新 feeds
-      run: |
-        cd $SDK_DIR
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-        echo "feeds 更新和安装完成"
-    
-    - name: 配置编译选项
-      run: |
-        cd $SDK_DIR
-        cat > .config << 'EOF'  # 注意：单引号防止变量替换
-CONFIG_TARGET_armsr=y
-CONFIG_TARGET_armsr_armv8=y
-CONFIG_PACKAGE_luci-app-openclash=y
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Update package lists
+        run: |
+          apt-get update
+          apt-get install -y git make gcc g++ libncurses-dev flex bison libssl-dev \
+          libxml-parser-perl python3 python3-pip python3-setuptools python3-cffi \
+          libpython3-dev libffi-dev automake autoconf libtool autopoint gawk \
+          gettext-base bc rsync file unzip
+
+      - name: Clone OpenWrt source
+        run: |
+          git clone https://github.com/openwrt/openwrt.git -b openwrt-23.05.5 openwrt-source
+          cd openwrt-source
+          git submodule update --init --recursive
+      
+      - name: Configure OpenWrt for arm64 v8
+        run: |
+          cd openwrt-source
+          # 选择arm64 v8架构的默认配置
+          make defconfig ARCH=arm64 SUBARCH=arm64
+          # 或者使用更具体的目标配置（根据实际硬件调整）
+          # make ath79-generic_defconfig ARCH=arm64 SUBARCH=arm64
+          
+          # 添加openclash和相关kmods的配置
+          make menuconfig -o .config << 'EOF'
+CONFIG_PACKAGE_openclash=y
 CONFIG_PACKAGE_kmod-tun=y
-CONFIG_PACKAGE_kmod-ipt-nat=y
-CONFIG_PACKAGE_kmod-ipt-masq=y
-CONFIG_PACKAGE_kmod-ipt-conntrack=y
-CONFIG_PACKAGE_kmod-ipt-core=y
+CONFIG_PACKAGE_kmod-inet-diag=y
 CONFIG_PACKAGE_kmod-nf-conntrack=y
-CONFIG_PACKAGE_kmod-nf-nat=y
+CONFIG_PACKAGE_kmod-nf-conntrack6=y
+CONFIG_PACKAGE_kmod-nf-flow=y
+CONFIG_PACKAGE_kmod-nf-ipt=y
+CONFIG_PACKAGE_kmod-nf-ipt6=y
+CONFIG_PACKAGE_kmod-nf-reject=y
+CONFIG_PACKAGE_kmod-nf-reject6=y
+CONFIG_PACKAGE_kmod-ipt-mod-tproxy=y
+CONFIG_PACKAGE_kmod-ip6tables-mod-tproxy=y
 EOF
-        make defconfig
-        echo "编译选项配置完成"
-    
-    - name: 编译 OpenClash 及依赖
-      run: |
-        cd $SDK_DIR
-        # 先编译内核模块
-        make package/kernel/kmod-tun/compile V=s -j$(nproc)
-        make package/kernel/kmod-ipt-nat/compile V=s -j$(nproc)
-        make package/kernel/kmod-ipt-masq/compile V=s -j$(nproc)
-        make package/kernel/kmod-ipt-conntrack/compile V=s -j$(nproc)
-        
-        # 再编译 OpenClash 主程序
-        make package/luci-app-openclash/compile V=s -j$(nproc) || make package/luci-app-openclash/compile V=99
-        echo "OpenClash 及依赖编译完成"
-    
-    - name: 查找编译结果
-      run: |
-        cd $SDK_DIR
-        IPK_DIR=$(find ./bin -name "packages" -type d | head -1)
-        echo "IPK_DIR=$IPK_DIR" >> $GITHUB_ENV
-        
-        OPENCLASH_IPK=$(find "$IPK_DIR" -name "luci-app-openclash_*.ipk" | head -1)
-        echo "OPENCLASH_IPK=$OPENCLASH_IPK" >> $GITHUB_ENV
-        
-        KMOD_IPKS=$(find "$IPK_DIR" -name "kmod-*.ipk")
-        echo "KMOD_IPKS=$KMOD_IPKS" >> $GITHUB_ENV
-        
-        echo "编译结果查找完成"
-    
-    - name: 打包编译结果
-      run: |
-        cd $SDK_DIR
-        mkdir -p release
-        cp $OPENCLASH_IPK release/
-        find "$IPK_DIR" -name "kmod-*.ipk" -exec cp {} release/ \;
-        
-        cd release
-        zip -r ../openclash-arm64-$(date +%Y%m%d).zip .
-        echo "编译结果打包完成"
-    
-    - name: 上传编译结果
-      uses: actions/upload-artifact@v4
-      with:
-        name: openclash-arm64
-        path: ${{ env.SDK_DIR }}/openclash-arm64-*.zip
-        if-no-files-found: error
+      
+      - name: Add openclash package source
+        run: |
+          cd openwrt-source
+          # 添加openclash的package源
+          mkdir -p feeds/packages/net
+          git clone https://github.com/vernesong/OpenClash.git feeds/packages/net/openclash
+          # 或者使用本地克隆（如果已存在）
+          # cp -rf ../OpenClash feeds/packages/net/openclash
+          
+          # 更新 feeds
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+      
+      - name: Compile OpenWrt with openclash
+        run: |
+          cd openwrt-source
+          # 开始编译，-j$(nproc) 使用所有可用核心
+          make -j$(nproc) V=s
+      
+      - name: Collect build artifacts
+        run: |
+          cd openwrt-source
+          mkdir -p $GITHUB_WORKSPACE/artifacts
+          # 复制openclash.ipk
+          cp bin/arm64/packages/net/openclash_*.ipk $GITHUB_WORKSPACE/artifacts/
+          # 复制相关kmods
+          cp bin/arm64/packages/kmods/kmod-tun_*.ipk $GITHUB_WORKSPACE/artifacts/
+          cp bin/arm64/packages/kmods/kmod-inet-diag_*.ipk $GITHUB_WORKSPACE/artifacts/
+          cp bin/arm64/packages/kmods/kmod-nf-conntrack_*.ipk $GITHUB_WORKSPACE/artifacts/
+          cp bin/arm64/packages/kmods/kmod-nf-conntrack6_*.ipk $GITHUB_WORKSPACE/artifacts/
+          cp bin/arm64/packages/kmods/kmod-nf-flow_*.ipk $GITHUB_WORKSPACE/artifacts/
+          cp bin/arm64/packages/kmods/kmod-nf-ipt_*.ipk $GITHUB_WORKSPACE/artifacts/
+          cp bin/arm64/packages/kmods/kmod-nf-ipt6_*.ipk $GITHUB_WORKSPACE/artifacts/
+          cp bin/arm64/packages/kmods/kmod-nf-reject_*.ipk $GITHUB_WORKSPACE/artifacts/
+          cp bin/arm64/packages/kmods/kmod-nf-reject6_*.ipk $GITHUB_WORKSPACE/artifacts/
+          cp bin/arm64/packages/kmods/kmod-ipt-mod-tproxy_*.ipk $GITHUB_WORKSPACE/artifacts/
+          cp bin/arm64/packages/kmods/kmod-ip6tables-mod-tproxy_*.ipk $GITHUB_WORKSPACE/artifacts/
+          # 复制OpenWrt固件（可选）
+          cp bin/arm64/images/*-squashfs-sysupgrade.bin $GITHUB_WORKSPACE/artifacts/ 2>/dev/null
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: openclash-arm64-v8-packages
+          path: $GITHUB_WORKSPACE/artifacts/
+          retention-days: 7
