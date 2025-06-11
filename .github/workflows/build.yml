@@ -36,7 +36,9 @@ jobs:
             libc6-dev-i386 uglifyjs msmtp texinfo libreadline-dev libglib2.0-dev \
             xmlto libelf-dev libtool autopoint antlr3 gperf ccache swig coreutils \
             haveged scons libpython3-dev jq \
-            libpam-dev liblzma-dev libsnmp-dev
+            libpam-dev liblzma-dev libsnmp-dev \
+            libxattr-dev libcurl4-openssl-dev libioctl-dev libgnutls28-dev \
+            libseccomp-dev libcap-dev libpcap-dev  # 添加OpenClash所需的额外依赖
 
       - name: Clone OpenWrt source
         run: |
@@ -59,6 +61,26 @@ jobs:
           cd openwrt-source
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+      - name: Patch OpenClash for arm64 compatibility
+        run: |
+          cd openwrt-source/feeds/packages/net/openclash
+          # 修复arm64架构下的兼容性问题
+          sed -i 's/#include <sys\/socket.h>/#include <sys\/socket.h>\n#include <sys\/ioctl.h>\n#include <netinet\/tcp.h>/' src/*.cpp
+          
+          # 添加缺失的宏定义（解决FIONBIO未定义问题）
+          cat >> include/netinet/tcp.h << 'EOF'
+          #ifndef FIONBIO
+          #define FIONBIO 0x5421
+          #endif
+          
+          #ifndef SO_NONBLOCK
+          #define SO_NONBLOCK 0x8000
+          #endif
+          EOF
+          
+          # 解决environ未声明问题
+          sed -i 's/#include <stdio.h>/#include <stdio.h>\nextern char **environ;/' src/*.cpp
 
       - name: Configure build
         run: |
@@ -86,6 +108,10 @@ jobs:
           echo "CONFIG_PACKAGE_coreutils-nohup=y" >> .config  # 后台运行支持
           echo "CONFIG_PACKAGE_bind-dig=y" >> .config  # DNS查询工具
           
+          # 确保正确的架构设置
+          echo "CONFIG_TARGET_armvirt=y" >> .config
+          echo "CONFIG_TARGET_armvirt_64=y" >> .config
+          
           # 保存配置文件以便调试
           cat .config > ../openwrt_config.txt
 
@@ -93,7 +119,7 @@ jobs:
         run: |
           cd openwrt-source
           echo "当前架构配置:"
-          cat .config | grep -E "CONFIG_TARGET_ARCH|CONFIG_TARGET_SUBTARGET"
+          cat .config | grep -E "CONFIG_TARGET_ARCH|CONFIG_TARGET_SUBTARGET|CONFIG_TARGET_armvirt"
           echo "OpenClash 相关配置:"
           cat .config | grep -E "openclash|tun|tproxy"
 
