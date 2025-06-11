@@ -19,7 +19,12 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/share/swift
           df -h
 
-      - name: Install build dependencies (含ncurses和缺失的依赖)
+      - name: Enable universe repository
+        run: |
+          sudo add-apt-repository universe
+          sudo apt-get update
+
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -30,14 +35,14 @@ jobs:
             libc6-dev-i386 uglifyjs msmtp texinfo libreadline-dev libglib2.0-dev \
             xmlto libelf-dev libtool autopoint antlr3 gperf ccache swig coreutils \
             haveged scons libpython3-dev jq \
-            libpam-dev liblzma-dev libnetsnmp-dev  # 新增缺失的依赖库
+            libpam-dev liblzma-dev libsnmp-dev  # 替换为libsnmp-dev
 
-      - name: Clone OpenWrt source (浅克隆)
+      - name: Clone OpenWrt source
         run: |
           git clone --depth=1 -b v23.05.5 https://github.com/openwrt/openwrt.git openwrt-source
           cd openwrt-source
 
-      - name: Clone OpenClash source (浅克隆)
+      - name: Clone OpenClash source
         run: |
           cd openwrt-source
           mkdir -p feeds/packages/net
@@ -49,12 +54,12 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Configure build (禁用有依赖问题的包)
+      - name: Configure build
         run: |
           cd openwrt-source
           make defconfig ARCH=arm64 SUBARCH=arm64
           
-          # 生成配置文件时禁用有依赖问题的包
+          # 禁用有依赖问题的包
           cat >> .config << 'EOF'
           # 禁用依赖libpam的包
           CONFIG_PACKAGE_busybox-pam=n
@@ -65,7 +70,7 @@ jobs:
           CONFIG_PACKAGE_lldpd=n
           EOF
           
-          # 确保openclash相关配置已启用
+          # 启用openclash相关配置
           echo "CONFIG_PACKAGE_openclash=y" >> .config
           echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
           # ... 其他openclash相关kmod配置
@@ -73,7 +78,7 @@ jobs:
       - name: Build OpenWrt with OpenClash
         run: |
           cd openwrt-source
-          make -j1 V=s  # 单线程编译，减少资源占用
+          make -j1 V=s
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
