@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   build:
@@ -11,7 +12,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Free disk space
         run: |
@@ -35,18 +36,23 @@ jobs:
             libc6-dev-i386 uglifyjs msmtp texinfo libreadline-dev libglib2.0-dev \
             xmlto libelf-dev libtool autopoint antlr3 gperf ccache swig coreutils \
             haveged scons libpython3-dev jq \
-            libpam-dev liblzma-dev libsnmp-dev  # 替换为libsnmp-dev
+            libpam-dev liblzma-dev libsnmp-dev
 
       - name: Clone OpenWrt source
         run: |
           git clone --depth=1 -b v23.05.5 https://github.com/openwrt/openwrt.git openwrt-source
           cd openwrt-source
+          echo "OpenWrt 版本信息:"
+          git log -1
 
       - name: Clone OpenClash source
         run: |
           cd openwrt-source
           mkdir -p feeds/packages/net
           git clone --depth=1 https://github.com/vernesong/OpenClash.git feeds/packages/net/openclash
+          echo "OpenClash 版本信息:"
+          cd feeds/packages/net/openclash
+          git log -1
 
       - name: Update feeds
         run: |
@@ -72,19 +78,85 @@ jobs:
           
           # 启用openclash相关配置
           echo "CONFIG_PACKAGE_openclash=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config  # 启用LuCI界面
           echo "CONFIG_PACKAGE_kmod-tun=y" >> .config
-          # ... 其他openclash相关kmod配置
+          echo "CONFIG_PACKAGE_kmod-ipt-mod-tproxy=y" >> .config  # 透明代理模块
+          echo "CONFIG_PACKAGE_ipset=y" >> .config  # IP集合管理工具
+          echo "CONFIG_PACKAGE_iptables-mod-tproxy=y" >> .config  # iptables TPROXY模块
+          echo "CONFIG_PACKAGE_coreutils-nohup=y" >> .config  # 后台运行支持
+          echo "CONFIG_PACKAGE_bind-dig=y" >> .config  # DNS查询工具
+          
+          # 保存配置文件以便调试
+          cat .config > ../openwrt_config.txt
+
+      - name: 显示配置信息（调试）
+        run: |
+          cd openwrt-source
+          echo "当前架构配置:"
+          cat .config | grep -E "CONFIG_TARGET_ARCH|CONFIG_TARGET_SUBTARGET"
+          echo "OpenClash 相关配置:"
+          cat .config | grep -E "openclash|tun|tproxy"
 
       - name: Build OpenWrt with OpenClash
         run: |
           cd openwrt-source
-          make -j1 V=s
+          # 先下载所有包以检测网络问题
+          make download -j8 V=s || make download -j1 V=s
+          echo "下载完成，开始编译..."
+          
+          # 使用多线程编译提高效率
+          make -j$(($(nproc) + 1)) V=s || make -j1 V=s IGNORE_ERRORS=1
+          
+          # 显示编译结果统计
+          echo "编译结果统计:"
+          find bin/targets/ -name "*.ipk" | wc -l
+          du -sh bin/
+
+      - name: 显示编译产物路径（调试）
+        run: |
+          cd openwrt-source
+          echo "编译产物目录结构:"
+          ls -R bin/packages/ || echo "bin/packages/ 目录不存在"
+          
+          # 查找关键IPK包
+          echo "查找OpenClash相关IPK包:"
+          find bin/ -name "openclash_*.ipk" -o -name "kmod-tun_*.ipk" || echo "未找到相关IPK包"
+
+      - name: 收集错误日志（如果编译失败）
+        if: failure()
+        run: |
+          cd openwrt-source
+          mkdir -p ../build_logs
+          # 收集错误日志
+          find build_dir/ -name "*.log" -exec cp {} ../build_logs/ \; || true
+          # 压缩日志文件
+          cd ../
+          zip -r build_logs.zip build_logs/
+
+      - name: 上传错误日志（如果编译失败）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-error-logs
+          path: build_logs.zip
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: openclash-ipk-and-kmods
           path: |
-            openwrt-source/bin/packages/arm64_cortex-a57_neon-vfpv4/openclash_*.ipk
-            openwrt-source/bin/packages/arm64_cortex-a57_neon-vfpv4/kmod-*.ipk
+            openwrt-source/bin/packages/*/packages/openclash_*.ipk
+            openwrt-source/bin/packages/*/packages/luci-app-openclash_*.ipk
+            openwrt-source/bin/packages/*/packages/kmod-tun_*.ipk
+            openwrt-source/bin/packages/*/packages/kmod-ipt-mod-tproxy_*.ipk
+            openwrt-source/bin/packages/*/packages/iptables-mod-tproxy_*.ipk
+            openwrt-source/bin/packages/*/packages/ipset_*.ipk
+          if-no-files-found: warn
+          retention-days: 14  # 延长保留时间到14天
+
+      - name: 上传配置文件（用于调试）
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-config
+          path: openwrt_config.txt
           retention-days: 7
