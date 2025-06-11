@@ -55,7 +55,7 @@ jobs:
     - name: 配置编译选项
       run: |
         cd $SDK_DIR
-        cat > .config << EOF
+        cat > .config << 'EOF'  # 注意：单引号防止变量替换
 CONFIG_TARGET_armsr=y
 CONFIG_TARGET_armsr_armv8=y
 CONFIG_PACKAGE_luci-app-openclash=y
